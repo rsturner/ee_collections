@@ -1,0 +1,228 @@
+# Library --
+library(tidyverse)
+
+# Load data --
+setwd("~")
+
+landsat <- arrow::read_csv_arrow("rum_landsat.csv", col_select = c('date', 'month_as_date', 'season_as_date',
+                                                                   'year_as_date', 'image_id', 'northing', 'easting',
+                                                                   'ndvi', 'pqa', 'spacecraft_id'))
+
+s2a <- arrow::read_csv_arrow("rum_sentinel_2a.csv", col_select = c('date', 'month_as_date', 'season_as_date',
+                                                                   'year_as_date', 'image_id', 'northing', 'easting',
+                                                                   'ndvi', 'pqa', 'spacecraft_id'))
+
+s2b <- arrow::read_csv_arrow("rum_sentinel_2b.csv", col_select = c('date', 'month_as_date', 'season_as_date',
+                                                                   'year_as_date', 'image_id', 'northing', 'easting',
+                                                                   'ndvi', 'pqa', 'spacecraft_id'))
+
+modis <- arrow::read_csv_arrow("rum_modis.csv", col_select = c('date', 'month_as_date', 'season_as_date',
+                                                               'year_as_date', 'image_id', 'northing', 'easting',
+                                                               'ndvi', 'pqa', 'spacecraft_id'))
+
+# Combine data from all satellites into a single df --
+combined_df <- bind_rows(landsat, s2a, s2b, modis)
+rm(list = c("landsat", "s2a", "s2b", "modis"))
+gc()
+
+# Split full collection by year --
+# Create a list of unique years
+year_list <- combined_df %>%
+  distinct(year(date)) %>%
+  pull()
+
+# Loop to write CSV for each unique year --
+# NB: Reading in data in year-specific batches is more memory efficient
+for (i in year_list) {
+  filtered_data <- combined_df %>%
+    filter(year(date) == i)
+  
+  write_csv(filtered_data, str_c("rum_", i, ".csv"))
+}
+
+# Function to read and combine year-specific CSVs  --
+read_and_combine <- function(prefixes, filter_pqa = FALSE) {
+  # Set options within the function
+  options(readr.show_progress = FALSE)
+  
+  # Get a list of CSV files in the working directory for each prefix
+  files <- lapply(prefixes, function(prefix) {
+    pattern <- ifelse(grepl("^rum_\\d{4}$", prefix), str_c(prefix, ".csv"), str_c(prefix, "\\d+\\.csv"))
+    list.files(pattern = pattern)
+  }) %>%
+    unlist(recursive = FALSE)
+  
+  # Read each CSV file and combine into a single data frame
+  data <- lapply(files, function(x) {
+    data <- read_csv(x, show_col_types = FALSE)
+    gc()
+    return(data)
+  }) %>%
+    bind_rows()
+  
+  # Optionally filter rows based on pqa == 'valid'
+  if (filter_pqa) {
+    data <- data %>%
+      filter(pqa == 'valid')
+  }
+  
+  return(data)
+}
+
+# Example usage --
+# Read and combine 'valid' only data for rum
+rum_data_filtered <- read_and_combine(c("rum_"), filter_pqa = TRUE)
+
+# Read and combine data for rum without any filtering
+rum_data_unfiltered <- read_and_combine(c("rum_"), filter_pqa = FALSE)
+
+# Read and combine 'valid' only data during the 1990's for rum
+rum_data_unfiltered <- read_and_combine(c("rum_199"), filter_pqa = TRUE)
+
+# Read and combine 'valid' only data during the 1980's and 1990's for rum
+rum_data_unfiltered <- read_and_combine(c("rum_198", "rum_199"), filter_pqa = TRUE)
+
+# Function to summarise pixel-level data at different temporal levels --
+# Parameters:
+#   - df: Dataframe containing the pixel-level satellite data.
+#   - temporal_level: Temporal level for summarisation (e.g., "days", "months", "seasons", "years"; default is "days").
+#   - spacecraft_id: Flag indicating whether to include spacecraft_id in the summarisation (default is TRUE).
+# Returns: A summarised dataframe based on the specified conditions.
+temporal_summary <- function(df, temporal_level = "days", spacecraft_id = TRUE) {
+  date_col <- switch(temporal_level,
+                     days = "date",
+                     months = "month_as_date",
+                     seasons = "season_as_date",
+                     years = "year_as_date",
+                     "date")
+
+  # Summarise data related to pqa and date variables
+  summarise_pqa <- function(df, temporal_level) {
+    group_by_cols <- c(date_col)
+    if (spacecraft_id) {
+      group_by_cols <- c(group_by_cols, "spacecraft_id")
+    }
+    
+    if (temporal_level %in% c("months", "seasons", "years")) {
+      df %>%
+        group_by(across(all_of(group_by_cols))) %>%
+        summarise(
+          n_images = n_distinct(image_id),
+          n_pixels = n(),
+          n_valid = sum(pqa == "valid"),
+          n_non_valid = sum(pqa == "non-valid"),
+          n_cloud = sum(pqa == "cloud"),
+          n_cloud_shadow = sum(pqa == "cloud_shadow"),
+          n_snow = sum(pqa == "snow"),
+          n_water = sum(pqa == "water"),
+          mean_date = mean(date),
+          median_date = median(date),
+          sd_date = sd(date),
+          min_date = min(date),
+          max_date = max(date),
+          spacecraft_id = ifelse(n_distinct(spacecraft_id) > 1, paste(unique(spacecraft_id), collapse = ", "), as.character(unique(spacecraft_id)))
+        )
+    } else {
+      df %>%
+        group_by(across(all_of(group_by_cols))) %>%
+        summarise(
+          n_images = n_distinct(image_id),
+          n_pixels = n(),
+          n_valid = sum(pqa == "valid"),
+          n_non_valid = sum(pqa == "non-valid"),
+          n_cloud = sum(pqa == "cloud"),
+          n_cloud_shadow = sum(pqa == "cloud_shadow"),
+          n_snow = sum(pqa == "snow"),
+          n_water = sum(pqa == "water"),
+          spacecraft_id = ifelse(n_distinct(spacecraft_id) > 1, paste(unique(spacecraft_id), collapse = ", "), as.character(unique(spacecraft_id)))
+        )
+    }
+  }
+
+  # Summarise data related to NDVI variable
+  summarise_ndvi <- function(df) {
+    group_by_cols <- c(date_col)
+    if (spacecraft_id) {
+      group_by_cols <- c(group_by_cols, "spacecraft_id")
+    }
+    
+    df %>%
+      filter(pqa == "valid", !is.na(ndvi), ndvi >= 0.15 & ndvi <= 1.0) %>%
+      summarise(
+        mean_ndvi = mean(ndvi),
+        median_ndvi = median(ndvi),
+        sd_ndvi = sd(ndvi),
+        min_ndvi = min(ndvi),
+        max_ndvi = max(ndvi),
+        count = length(ndvi)
+      )
+  }
+  
+  by_val <- if (temporal_level == "months") {
+    "months"
+  } else if (temporal_level == "seasons") {
+    "3 months"
+  } else if (temporal_level == "years") {
+    "years"
+  } else {
+    "days"
+  }
+  
+  result <- df %>%
+    group_by(across(all_of(c(date_col, if (spacecraft_id) "spacecraft_id")))) %>%
+    summarise_pqa(temporal_level) %>%
+    ungroup() %>%
+    distinct() %>%
+    complete({{ date_col }} := seq.Date(min(df[[date_col]]), max(df[[date_col]]), by = by_val)) %>%
+    fill(.direction = "down") %>%
+    arrange({{ date_col }}) %>%
+    left_join(
+      df %>%
+        group_by(across(all_of(c(date_col, if (spacecraft_id) "spacecraft_id")))) %>%
+        summarise_ndvi() %>%
+        ungroup() %>%
+        distinct(),
+      by = c(date_col, if (spacecraft_id) "spacecraft_id")
+    )
+
+  # Additional processing of date_col based on the temporal level defined. 
+  if (temporal_level == "months") {
+    result <- result %>%
+      mutate(year = year(result[[date_col]]),
+             month = month(result[[date_col]])) %>%
+      select(year, month, everything()) %>%
+      select(-c(month_as_date))
+  } else if (temporal_level == "seasons") {
+    result <- result %>%
+      mutate(year = year(result[[date_col]]),
+             month = month(result[[date_col]]),
+             season = case_when(
+               month %in% c(3) ~ "spring",
+               month %in% c(6) ~ "summer",
+               month %in% c(9) ~ "autumn",
+               month %in% c(12) ~ "winter"
+             )) %>%
+      select(year, season, everything()) %>%
+      select(-c(season_as_date, month))
+  } else if (temporal_level == "years") {
+    result <- result %>%
+      mutate(year = year(result[[date_col]])) %>%
+      select(year, everything()) %>%
+      select(-c(year_as_date))
+  }
+  
+  return(result)
+}
+
+# Example usage --
+daily_sat_df <- temporal_summary(rum_data_unfiltered, temporal_level = "days", spacecraft_id = TRUE)
+daily_df <- temporal_summary(rum_data_unfiltered, temporal_level = "days", spacecraft_id = FALSE)
+
+monthly_sat_df <- temporal_summary(rum_data_unfiltered, temporal_level = "months", spacecraft_id = TRUE)
+monthly_df <- temporal_summary(rum_data_unfiltered, temporal_level = "months", spacecraft_id = FALSE)
+
+seasonal_sat_df <- temporal_summary(rum_data_unfiltered, temporal_level = "seasons", spacecraft_id = TRUE)
+seasonal_df <- temporal_summary(rum_data_unfiltered, temporal_level = "seasons", spacecraft_id = FALSE)
+
+annual_sat_df <- temporal_summary(rum_data_unfiltered, temporal_level = "years", spacecraft_id = TRUE)
+annual_df <- temporal_summary(rum_data_unfiltered, temporal_level = "years", spacecraft_id = FALSE)
