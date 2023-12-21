@@ -1,0 +1,281 @@
+# Import necessary libraries.
+import geopandas as gpd  # For geospatial data manipulation
+import pandas as pd  # For data manipulation
+import json 
+import ee  # Google Earth Engine API
+import wxee  # Extension for Google Earth Engine
+from shapely.geometry import Point  
+import numpy as np 
+from datetime import datetime  # For working with dates
+
+# Authenticate and initialise Earth Engine API.
+ee.Authenticate()
+ee.Initialize()
+
+# Apply scaling factors to MODIS.
+def applyScaleFactors_MODIS(image):
+  optical_bands = image.select('sur_refl_b.*').multiply(0.0001)
+  return image.addBands(optical_bands, None, True) \
+              .select(['sur_refl_b01', 'sur_refl_b02', 'state_1km'], ['RED', 'NIR', 'PQA'])
+
+# NDVI function.
+def addNDVI_MODIS(image):
+    ndvi = image.normalizedDifference(['NIR', 'RED']).rename('NDVI')
+    return image.addBands(ndvi)
+
+# Read in shapefile to define the region of interest (roi).
+shapefile = gpd.read_file('~/path_to_shapefile/isle_of_rum.shp')
+shapefile = gpd.read_file('~/Documents/shapefiles/isle_of_rum.shp')
+js = json.loads(shapefile.to_json())
+roi = ee.Geometry(ee.FeatureCollection(js).geometry())
+
+# Convert float64 values to float32.
+def convertToFloat32(image):
+    return image.toFloat()
+
+# Import the entire MODIS collection, in 5 year batches to make processing more manageable.
+modis_2000 = (ee.ImageCollection('MODIS/061/MOD09GA').filterDate('2000-02-24', '2004-12-31')
+                                                .filterBounds(roi)
+                                                .map(applyScaleFactors_MODIS)
+                                                .map(addNDVI_MODIS)
+                                                .map(convertToFloat32))
+
+modis_2005 = (ee.ImageCollection('MODIS/061/MOD09GA').filterDate('2005-01-01', '2009-12-31')
+                                                .filterBounds(roi)
+                                                .map(applyScaleFactors_MODIS)
+                                                .map(addNDVI_MODIS)
+                                                .map(convertToFloat32))
+
+modis_2010 = (ee.ImageCollection('MODIS/061/MOD09GA').filterDate('2010-01-01', '2014-12-31')
+                                                .filterBounds(roi)
+                                                .map(applyScaleFactors_MODIS)
+                                                .map(addNDVI_MODIS)
+                                                .map(convertToFloat32))
+
+modis_2015 = (ee.ImageCollection('MODIS/061/MOD09GA').filterDate('2015-01-01', '2019-12-31')
+                                                .filterBounds(roi)
+                                                .map(applyScaleFactors_MODIS)
+                                                .map(addNDVI_MODIS)
+                                                .map(convertToFloat32))
+
+modis_2020 = (ee.ImageCollection('MODIS/061/MOD09GA').filterDate('2020-01-01', '2023-12-08')
+                                                .filterBounds(roi)
+                                                .map(applyScaleFactors_MODIS)
+                                                .map(addNDVI_MODIS)
+                                                .map(convertToFloat32))
+
+# Transform image collection to xarray.
+scale = 500
+crs = 'EPSG:4326'
+modis_2000_ds = modis_2000.wx.to_xarray(scale = scale, crs=crs, region = roi)
+modis_2005_ds = modis_2005.wx.to_xarray(scale = scale, crs=crs, region = roi)
+modis_2010_ds = modis_2010.wx.to_xarray(scale = scale, crs=crs, region = roi)
+modis_2015_ds = modis_2015.wx.to_xarray(scale = scale, crs=crs, region = roi)
+modis_2020_ds = modis_2020.wx.to_xarray(scale = scale, crs=crs, region = roi)
+
+# Clip xarray to retain only data within the shapefile boundaries.
+def clip_to_shp(xarr, shapefile):
+    df = xarr.to_dataframe().reset_index()
+
+    # Renaming columns and dropping 'spatial_ref' column
+    df.rename(columns={'time': 'TIME', 'x': 'X', 'y': 'Y'}, inplace=True)
+    df.drop(columns='spatial_ref', errors='ignore', inplace=True)
+
+    # Creating a GeoDataFrame from the DataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['X'], df['Y']), crs='EPSG:4326')
+
+    # Clipping the GeoDataFrame using the shapefile
+    gdf = gpd.clip(gdf, shapefile)
+
+    df_clipped = gdf.drop(columns='geometry')
+
+    # Grouping by 'TIME' and creating 'IMAGE ID'
+    df_clipped['IMAGE_ID'] = df_clipped.groupby('TIME').ngroup() + 1
+
+    # Reorder rows based on 'IMAGE_ID', 'TIME', 'X', and 'Y' columns
+    df_clipped = df_clipped.sort_values(['IMAGE_ID', 'TIME', 'X', 'Y'])
+
+    return df_clipped
+
+modis_2000_df = clip_to_shp(modis_2000_ds, shapefile)
+modis_2005_df = clip_to_shp(modis_2005_ds, shapefile)
+modis_2010_df = clip_to_shp(modis_2010_ds, shapefile)
+modis_2015_df = clip_to_shp(modis_2015_ds, shapefile)
+modis_2020_df = clip_to_shp(modis_2020_ds, shapefile)
+
+# Drop the 'IMAGE_ID' column as it is no longer needed.
+modis_2000_df.drop(columns='IMAGE_ID', inplace=True)
+modis_2005_df.drop(columns='IMAGE_ID', inplace=True)
+modis_2010_df.drop(columns='IMAGE_ID', inplace=True)
+modis_2015_df.drop(columns='IMAGE_ID', inplace=True)
+modis_2020_df.drop(columns='IMAGE_ID', inplace=True)
+
+# Combine to a single dataframe.
+modis_collection = pd.concat([modis_2000_df, modis_2005_df, modis_2010_df, modis_2015_df, modis_2020_df], axis=0)
+
+# Transform PQA to bitstring, prior to classifying pixels.
+def int_to_16bit(number):
+    # Check if the value is NaN
+    if pd.isna(number):
+        return 'NaN'
+
+    # Convert float to integer if needed
+    number = int(number)
+
+    # Convert the integer to binary and remove the '0b' prefix
+    binary_representation = bin(number)[2:]
+
+    # Ensure the binary representation is 16 bits long by adding leading zeros if needed
+    binary_representation = binary_representation.zfill(16)
+
+    return binary_representation
+
+# Apply to the 'PQA' column.
+modis_collection['PQA_BIT'] = modis_collection['PQA'].apply(int_to_16bit)
+
+# Split the 'PQA_BIT' column into new columns for each bit or bit combination. 
+modis_collection['BIT_15'] = modis_collection['PQA_BIT'].str[0]
+modis_collection['BIT_14'] = modis_collection['PQA_BIT'].str[1]
+modis_collection['BIT_13'] = modis_collection['PQA_BIT'].str[2]
+modis_collection['BIT_12'] = modis_collection['PQA_BIT'].str[3]
+modis_collection['BIT_11'] = modis_collection['PQA_BIT'].str[4]
+modis_collection['BIT_10'] = modis_collection['PQA_BIT'].str[5]
+modis_collection['BIT_89'] = modis_collection['PQA_BIT'].str[6:8]
+modis_collection['BIT_67'] = modis_collection['PQA_BIT'].str[8:10]
+modis_collection['BIT_345'] = modis_collection['PQA_BIT'].str[10:13]
+modis_collection['BIT_2'] = modis_collection['PQA_BIT'].str[13]
+modis_collection['BIT_01'] = modis_collection['PQA_BIT'].str[14:]
+
+# Apply classification to match Landsat and Sentinel data.
+def modify_PQA(row):
+    if row['BIT_01'] in ['01', '10']:
+        return 'cloud'
+    elif row['BIT_2'] == '1':
+        return 'cloud_shadow'
+    elif row['BIT_345'] in ['000', '010', '011', '100', '101', '110', '111']:
+        return 'water'
+    elif row['BIT_67'] in ['01', '10', '11']:
+        return 'non_valid'
+    elif row['BIT_89'] in ['01', '10', '11']:
+        return 'cloud'
+    elif row['BIT_10'] == '1':
+        return 'cloud'
+    elif row['BIT_11'] == '1':
+        return 'non_valid'
+    elif row['BIT_12'] == '1':
+        return 'snow'
+    elif row['BIT_13'] == '1':
+        return 'valid'
+    elif row['BIT_14'] == '1':
+        return 'valid'
+    elif row['BIT_15'] == '1':
+        return 'snow'
+    else:
+        return 'valid'
+
+modis_collection['PQA'] = modis_collection.apply(modify_PQA, axis=1)
+
+# Apply strip() and lower() to columns.
+modis_collection = modis_collection.astype(str)
+modis_collection = modis_collection.apply(lambda x: x.str.strip().str.lower())
+
+# Replace 'nan' with 'NA'.
+modis_collection = modis_collection.replace('nan', 'NA')
+
+# Function to split the 'TIME' column into 'DATE' and 'TIME' then reorder columns to ensure they come first.
+def datetime(df):
+    # Convert 'TIME' column to datetime
+    df['TIME'] = pd.to_datetime(df['TIME'])
+
+    # Extracting date and time components
+    df['DATE'] = df['TIME'].dt.date
+    df['TIME'] = df['TIME'].dt.time
+
+    # Reorder columns
+    cols = list(df.columns)
+    cols.remove('DATE')
+    cols.remove('TIME')
+    df = df[['DATE', 'TIME'] + cols]
+
+    # Convert all column names to lowercase
+    df.columns = map(str.lower, df.columns)
+
+    return df
+
+modis_collection = datetime(modis_collection)
+
+# Function to transform projection to British National Grid EPSG:27700.
+def convert_coordinates(df, input_crs='EPSG:4326', output_crs='EPSG:27700'):
+    # Create a GeoDataFrame
+    geometry = [Point(xy) for xy in zip(df['x'], df['y'])]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=input_crs)
+
+    # Transform coordinates
+    gdf = gdf.to_crs(output_crs)
+
+    # Extract easting and northing coordinates
+    gdf['easting'] = gdf['geometry'].x
+    gdf['northing'] = gdf['geometry'].y
+
+    # Drop the geometry column if needed
+    df_transformed = gdf.drop(columns='geometry')
+
+    return df_transformed
+
+modis_collection = convert_coordinates(modis_collection)
+
+# NB: MODIS images do not contain additional metadata. Mutate spacecraft_id column with all rows given 'modis'.
+# All images from this collection are from the Terra satellite.
+modis_collection['spacecraft_id'] = 'modis'
+
+# Select specific columns.
+selected_columns = ['date', 'time', 'northing', 'easting', 'nir', 'red', 'ndvi', 'pqa', 'spacecraft_id']
+modis_collection = modis_collection[selected_columns]
+
+# Create columns for month, season, and date.
+def process_dates(df):
+    df['date'] = pd.to_datetime(df['date'])
+    df['month'] = df['date'].dt.month
+    df['year'] = df['date'].dt.year
+    df['month_as_date'] = pd.to_datetime(df.apply(lambda row: f"{row['year']}-{row['month']:02d}-01", axis=1))
+    df['year_as_date'] = pd.to_datetime(df['year'].apply(lambda year: f"{year}-01-01"))
+    return df
+
+modis_collection = process_dates(modis_collection)
+
+def calculate_season_date(row):
+    if 3 <= row['month'] <= 5:
+        return pd.to_datetime(f"{row['year']}-03-01")
+    elif 6 <= row['month'] <= 8:
+        return pd.to_datetime(f"{row['year']}-06-01")
+    elif 9 <= row['month'] <= 11:
+        return pd.to_datetime(f"{row['year']}-09-01")
+    elif row['month'] == 12:
+        return pd.to_datetime(f"{row['year']}-12-01")
+    else:
+        return pd.to_datetime(f"{row['year'] - 1}-12-01")
+
+def add_season_as_date_column(df):
+    df['season_as_date'] = df.apply(calculate_season_date, axis=1)
+    return df
+
+modis_collection = add_season_as_date_column(modis_collection)
+
+# Convert all character columns to lowercase.
+modis_collection = modis_collection.apply(lambda x: x.astype(str).str.lower() if x.dtype == 'O' else x)
+
+# Filter duplicates, keeping the first instance.
+modis_collection = modis_collection.drop_duplicates()
+
+# Mutate unique image_id column.
+modis_collection['image_id'] = (modis_collection['date'].astype(str) + '_' +
+                                modis_collection['time'].astype(str) + '_' +
+                                modis_collection['spacecraft_id'].astype(str))
+
+# Select specific columns.
+selected_columns = ['date', 'month_as_date', 'season_as_date', 'year_as_date',
+                    'image_id', 'northing', 'easting', 'ndvi', 'pqa', 'spacecraft_id']
+modis_collection = modis_collection[selected_columns]
+
+# Export to csv
+modis_collection = modis_collection.to_csv("rum_modis.csv")
