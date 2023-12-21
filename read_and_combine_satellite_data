@@ -77,10 +77,10 @@ rum_data_filtered <- read_and_combine(c("rum_"), filter_pqa = TRUE)
 rum_data_unfiltered <- read_and_combine(c("rum_"), filter_pqa = FALSE)
 
 # Read and combine 'valid' only data during the 1990's for rum
-rum_data_unfiltered <- read_and_combine(c("rum_199"), filter_pqa = TRUE)
+rum_data_80 <- read_and_combine(c("rum_199"), filter_pqa = TRUE)
 
 # Read and combine 'valid' only data during the 1980's and 1990's for rum
-rum_data_unfiltered <- read_and_combine(c("rum_198", "rum_199"), filter_pqa = TRUE)
+rum_data_80_90 <- read_and_combine(c("rum_198", "rum_199"), filter_pqa = TRUE)
 
 # Function to summarise pixel-level data at different temporal levels --
 # Parameters:
