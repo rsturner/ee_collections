@@ -1,0 +1,458 @@
+# Import necessary libraries
+import geopandas as gpd  # For geospatial data manipulation
+import pandas as pd  # For data manipulation
+import json 
+import ee  # Google Earth Engine API
+import wxee  # Extension for Google Earth Engine
+from shapely.geometry import Point  
+import numpy as np 
+from datetime import datetime  # For working with dates
+
+# Authenticate and initialise Earth Engine API
+# ee.Authenticate()
+# ee.Initialize()
+
+# Apply scaling factors to Landsat 4-7.
+def applyScaleFactors_L457(image):
+    optical_bands = image.select('SR_B.*').multiply(0.0000275).add(-0.2)
+    thermal_bands = image.select('ST_B.*').multiply(0.00341802).add(149.0)  # ST_B6
+    return image.addBands(optical_bands, None, True) \
+        .addBands(thermal_bands, None, True)
+
+# Apply scaling factors to Landsat 8.
+def applyScaleFactors_L8(image):
+    optical_bands = image.select('SR_B.*').multiply(0.0000275).add(-0.2)
+    thermal_bands = image.select('ST_B.*').multiply(0.00341802).add(149.0)  # ST_B10
+    return image.addBands(optical_bands, None, True) \
+        .addBands(thermal_bands, None, True)
+
+# Apply scaling factors to Landsat 9.
+def applyScaleFactors_L9(image):
+    optical_bands = image.select('SR_B.*').multiply(0.0000275).add(-0.2)
+    thermal_bands = image.select('ST_B.*').multiply(0.00341802).add(149.0)  # ST_B10
+    return image.addBands(optical_bands, None, True) \
+        .addBands(thermal_bands, None, True)
+
+# Classify Landsat 4-7 pixels.
+def addPixelClass_L457(image):
+    fill = 1 << 0 # Bit 0
+    dilated_cloud = 1 << 1 # Bit 1
+    cloud = 1 << 3 # Bit 3
+    cloud_shadow = 1 << 4 # Bit 4
+    snow = 1 << 5 # Bit 5
+    water = 1 << 7 # Bit 7
+
+    # Get the QA band.
+    qa = image.select('QA_PIXEL')
+
+    class_value = ee.Image.constant(6)  # Bit 6 denotes clear pixel in collection
+    class_value = class_value.where(qa.bitwiseAnd(fill), 0)
+    class_value = class_value.where(qa.bitwiseAnd(dilated_cloud), 1)
+    class_value = class_value.where(qa.bitwiseAnd(cloud), 3)
+    class_value = class_value.where(qa.bitwiseAnd(cloud_shadow), 4)
+    class_value = class_value.where(qa.bitwiseAnd(snow), 5)
+    class_value = class_value.where(qa.bitwiseAnd(water), 7)
+
+    return image.select('SR_B.*', 'ST_B.*') \
+        .addBands(class_value.rename('PQA')) \
+        .set('system:time_start', image.get('system:time_start'))
+
+# Classify Landsat 8 image pixels.
+def addPixelClass_L8(image):
+    fill = 1 << 0 # Bit 0
+    dilated_cloud = 1 << 1 # Bit 1
+    cirrus_cloud = 1 << 2 # Bit 2
+    cloud = 1 << 3 # Bit 3
+    cloud_shadow = 1 << 4 # Bit 4
+    snow = 1 << 5 # Bit 5
+    water = 1 << 7 # Bit 7
+
+    # Get the QA band.
+    qa = image.select('QA_PIXEL')
+
+    class_value = ee.Image.constant(6)  # Bit 6 denotes clear pixel in collection
+    class_value = class_value.where(qa.bitwiseAnd(fill), 0)
+    class_value = class_value.where(qa.bitwiseAnd(dilated_cloud), 1)
+    class_value = class_value.where(qa.bitwiseAnd(cirrus_cloud), 2)
+    class_value = class_value.where(qa.bitwiseAnd(cloud), 3)
+    class_value = class_value.where(qa.bitwiseAnd(cloud_shadow), 4)
+    class_value = class_value.where(qa.bitwiseAnd(snow), 5)
+    class_value = class_value.where(qa.bitwiseAnd(water), 7)
+
+    return image.select('SR_B.*', 'ST_B.*') \
+        .addBands(class_value.rename('PQA')) \
+        .set('system:time_start', image.get('system:time_start'))
+
+# Classify Landsat 9 image pixels.
+def addPixelClass_L9(image):
+    fill = 1 << 0 # Bit 0
+    dilated_cloud = 1 << 1 # Bit 1
+    cirrus_cloud = 1 << 2 # Bit 2
+    cloud = 1 << 3 # Bit 3
+    cloud_shadow = 1 << 4 # Bit 4
+    snow = 1 << 5 # Bit 5
+    water = 1 << 7 # Bit 7
+
+    # Get the QA band.
+    qa = image.select('QA_PIXEL')
+
+    class_value = ee.Image.constant(6)  # Bit 6 denotes clear pixel in collection
+    class_value = class_value.where(qa.bitwiseAnd(fill), 0)
+    class_value = class_value.where(qa.bitwiseAnd(dilated_cloud), 1)
+    class_value = class_value.where(qa.bitwiseAnd(cirrus_cloud), 2)
+    class_value = class_value.where(qa.bitwiseAnd(cloud), 3)
+    class_value = class_value.where(qa.bitwiseAnd(cloud_shadow), 4)
+    class_value = class_value.where(qa.bitwiseAnd(snow), 5)
+    class_value = class_value.where(qa.bitwiseAnd(water), 7)
+
+    return image.select('SR_B.*', 'ST_B.*') \
+        .addBands(class_value.rename('PQA')) \
+        .set('system:time_start', image.get('system:time_start'))
+
+# NDVI for Landsat 4-7.
+def addNDVI_L457(image):
+    ndvi = image.normalizedDifference(['SR_B4', 'SR_B3']).rename('NDVI')
+    return image.addBands(ndvi)
+
+# NDVI for Landsat 8.
+def addNDVI_L8(image):
+    ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI')
+    return image.addBands(ndvi)
+
+# NDVI for Landsat 9.
+def addNDVI_L9(image):
+    ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI')
+    return image.addBands(ndvi)
+
+# Read in shapefile to define the region of interest (roi).
+shapefile = gpd.read_file('~/path_to_shapefile/isle_of_rum.shp')
+js = json.loads(shapefile.to_json())
+roi = ee.Geometry(ee.FeatureCollection(js).geometry())
+
+# Convert float64 values to float32.
+def convertToFloat32(image):
+    return image.toFloat()
+
+# Import the entire Landsat collections for different series.
+l4 = (ee.ImageCollection('LANDSAT/LT04/C02/T1_L2').filterDate('1982-08-22', '1993-06-24')
+                                                  .filterBounds(roi)
+                                                  .map(applyScaleFactors_L457)
+                                                  .map(addPixelClass_L457)
+                                                  .map(addNDVI_L457)
+                                                  .select('SR_B3', 'SR_B4', 'NDVI', 'PQA')
+                                                  .map(convertToFloat32))
+
+l5 = (ee.ImageCollection('LANDSAT/LT05/C02/T1_L2').filterDate('1984-03-16', '2012-05-05')
+                                                  .filterBounds(roi)
+                                                  .map(applyScaleFactors_L457)
+                                                  .map(addPixelClass_L457)
+                                                  .map(addNDVI_L457)
+                                                  .select('SR_B3', 'SR_B4', 'NDVI', 'PQA')
+                                                  .map(convertToFloat32))
+
+l7 = (ee.ImageCollection('LANDSAT/LE07/C02/T1_L2').filterDate('1999-05-28', '2023-12-07')
+                                                  .filterBounds(roi)
+                                                  .map(applyScaleFactors_L457)
+                                                  .map(addPixelClass_L457)
+                                                  .map(addNDVI_L457)
+                                                  .select('SR_B3', 'SR_B4', 'NDVI','PQA')
+                                                  .map(convertToFloat32))
+
+l8 = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2').filterDate('2013-03-18', '2023-12-07')
+                                                  .filterBounds(roi)
+                                                  .map(applyScaleFactors_L8)
+                                                  .map(addPixelClass_L8)
+                                                  .map(addNDVI_L8)
+                                                  .select('SR_B4', 'SR_B5', 'NDVI', 'PQA')
+                                                  .map(convertToFloat32))
+
+l9 = (ee.ImageCollection('LANDSAT/LC09/C02/T1_L2').filterDate('2021-10-31', '2023-12-07')
+                                                  .filterBounds(roi)
+                                                  .map(applyScaleFactors_L9)
+                                                  .map(addPixelClass_L9)
+                                                  .map(addNDVI_L9)
+                                                  .select('SR_B4', 'SR_B5', 'NDVI', 'PQA')
+                                                  .map(convertToFloat32))
+
+# Split Landsat 5, 7, 8, and 9 collections into more manageable batches for processing. 
+def split_image_collection(image_collection):
+    # Get the size of the image collection
+    collection_size = image_collection.size()
+
+    # Convert the image collection to a list
+    image_list = image_collection.toList(collection_size)
+
+    # Calculate the split index
+    split_index = collection_size.divide(2).ceil()
+
+    # Split the list into two halves
+    first_half = ee.ImageCollection(image_list.slice(0, split_index))
+    second_half = ee.ImageCollection(image_list.slice(split_index))
+
+    return first_half, second_half
+
+l5_1, l5_2 = split_image_collection(l5)
+l7_1, l7_2 = split_image_collection(l7)
+l8_1, l8_2 = split_image_collection(l8)
+l9_1, l9_2 = split_image_collection(l9)
+
+# Function to extract image metadata.
+def extract_metadata_to_df(image_collection):
+    # Get information from the ImageCollection
+    metadata = image_collection.getInfo()
+
+    # Extract properties
+    features = metadata['features']
+    properties_list = []
+    for feature in features:
+        properties_list.append(feature['properties'])
+
+    # Convert to pandas DataFrame
+    df = pd.DataFrame(properties_list)
+
+    # Rename index to 'IMAGE_ID' and make it a column
+    df = df.reset_index().rename(columns={'index': 'IMAGE_ID'})
+    df['IMAGE_ID'] = df.IMAGE_ID + 1
+
+    # Select specific columns (optional)
+    required_columns = ['IMAGE_ID', 'SPACECRAFT_ID']
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = float('nan')
+
+    # Reorder columns
+    df = df[required_columns]
+
+    return df
+
+# Extract image metadata.
+l4_metadata = extract_metadata_to_df(l4)
+l5_1_metadata = extract_metadata_to_df(l5_1)
+l5_2_metadata = extract_metadata_to_df(l5_2)
+l7_1_metadata = extract_metadata_to_df(l7_1)
+l7_2_metadata = extract_metadata_to_df(l7_2)
+l8_1_metadata = extract_metadata_to_df(l8_1)
+l8_2_metadata = extract_metadata_to_df(l8_2)
+l9_1_metadata = extract_metadata_to_df(l9_1)
+l9_2_metadata = extract_metadata_to_df(l9_2)
+
+# Transform collections to xarray.
+scale = 30  # pixel resolution
+crs = 'EPSG:4326' # coordinate reference system
+l4_ds = l4.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l5_1_ds = l5_1.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l5_2_ds = l5_2.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l7_1_ds = l7_1.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l7_2_ds = l7_2.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l8_1_ds = l8_1.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l8_2_ds = l8_2.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l9_1_ds = l9_1.wx.to_xarray(scale=scale, crs=crs, region=roi)
+l9_2_ds = l9_2.wx.to_xarray(scale=scale, crs=crs, region=roi)
+
+# Clip each xarray to retain only data within the shapefile boundaries.
+def clip_to_shp(xarr, shapefile):
+    df = xarr.to_dataframe().reset_index()
+
+    # Renaming columns and dropping 'spatial_ref' column
+    df.rename(columns={'time': 'TIME', 'x': 'X', 'y': 'Y'}, inplace=True)
+    df.drop(columns='spatial_ref', errors='ignore', inplace=True)
+
+    # Creating a GeoDataFrame from the DataFrame
+    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['X'], df['Y']), crs='EPSG:4326')
+
+    # Clipping the GeoDataFrame using the shapefile
+    gdf = gpd.clip(gdf, shapefile)
+    df_clipped = gdf.drop(columns='geometry')
+
+    # Grouping by 'TIME' and creating 'IMAGE ID'
+    df_clipped['IMAGE_ID'] = df_clipped.groupby('TIME').ngroup() + 1
+
+    # Reorder rows based on 'IMAGE_ID', 'TIME', 'X', and 'Y' columns
+    df_clipped = df_clipped.sort_values(['IMAGE_ID', 'TIME', 'X', 'Y'])
+
+    return df_clipped
+
+l4_clipped = clip_to_shp(l4_ds, shapefile)
+l5_1_clipped = clip_to_shp(l5_1_ds, shapefile)
+l5_2_clipped = clip_to_shp(l5_2_ds, shapefile)
+l7_1_clipped = clip_to_shp(l7_1_ds, shapefile)
+l7_2_clipped = clip_to_shp(l7_2_ds, shapefile)
+l8_1_clipped = clip_to_shp(l8_1_ds, shapefile)
+l8_2_clipped = clip_to_shp(l8_2_ds, shapefile)
+l9_1_clipped = clip_to_shp(l9_1_ds, shapefile)
+l9_2_clipped = clip_to_shp(l9_2_ds, shapefile)
+
+# Join clipped and metadata dataframes by 'IMAGE_ID'.
+l4_df = l4_clipped.merge(l4_metadata, on='IMAGE_ID')
+l5_1_df = l5_1_clipped.merge(l5_1_metadata, on='IMAGE_ID')
+l5_2_df = l5_2_clipped.merge(l5_2_metadata, on='IMAGE_ID')
+l7_1_df = l7_1_clipped.merge(l7_1_metadata, on='IMAGE_ID')
+l7_2_df = l7_2_clipped.merge(l7_2_metadata, on='IMAGE_ID')
+l8_1_df = l8_1_clipped.merge(l8_1_metadata, on='IMAGE_ID')
+l8_2_df = l8_2_clipped.merge(l8_2_metadata, on='IMAGE_ID')
+l9_1_df = l9_1_clipped.merge(l9_1_metadata, on='IMAGE_ID')
+l9_2_df = l9_2_clipped.merge(l9_2_metadata, on='IMAGE_ID')
+
+# Drop the 'IMAGE_ID' column as it is no longer needed.
+l4_df.drop(columns='IMAGE_ID', inplace=True)
+l5_1_df.drop(columns='IMAGE_ID', inplace=True)
+l5_2_df.drop(columns='IMAGE_ID', inplace=True)
+l7_1_df.drop(columns='IMAGE_ID', inplace=True)
+l7_2_df.drop(columns='IMAGE_ID', inplace=True)
+l8_1_df.drop(columns='IMAGE_ID', inplace=True)
+l8_2_df.drop(columns='IMAGE_ID', inplace=True)
+l9_1_df.drop(columns='IMAGE_ID', inplace=True)
+l9_2_df.drop(columns='IMAGE_ID', inplace=True)
+
+# Rename SR bands for each Landsat collection.
+bandnames_l457 = {'SR_B3': 'RED', 'SR_B4': 'NIR'}
+bandnames_l89 = {'SR_B4': 'RED', 'SR_B5': 'NIR'}
+
+l4_df = l4_df.rename(columns=bandnames_l457)
+l5_1_df = l5_1_df.rename(columns=bandnames_l457)
+l5_2_df = l5_2_df.rename(columns=bandnames_l457)
+l7_1_df = l7_1_df.rename(columns=bandnames_l457)
+l7_2_df = l7_2_df.rename(columns=bandnames_l457)
+l8_1_df = l8_1_df.rename(columns=bandnames_l89)
+l8_2_df = l8_2_df.rename(columns=bandnames_l89)
+l9_1_df = l9_1_df.rename(columns=bandnames_l89)
+l9_2_df = l9_2_df.rename(columns=bandnames_l89)
+
+# Convert columns to strings.
+l4_df = l4_df.astype(str)
+l5_1_df = l5_1_df.astype(str)
+l5_2_df = l5_2_df.astype(str)
+l7_1_df = l7_1_df.astype(str)
+l7_2_df = l7_2_df.astype(str)
+l8_1_df = l8_1_df.astype(str)
+l8_2_df = l8_2_df.astype(str)
+l9_1_df = l9_1_df.astype(str)
+l9_2_df = l9_2_df.astype(str)
+
+# Apply strip() and lower() to columns.
+l4_df = l4_df.apply(lambda x: x.str.strip().str.lower())
+l5_1_df = l5_1_df.apply(lambda x: x.str.strip().str.lower())
+l5_2_df = l5_2_df.apply(lambda x: x.str.strip().str.lower())
+l7_1_df = l7_1_df.apply(lambda x: x.str.strip().str.lower())
+l7_2_df = l7_2_df.apply(lambda x: x.str.strip().str.lower())
+l8_1_df = l8_1_df.apply(lambda x: x.str.strip().str.lower())
+l8_1_df = l8_2_df.apply(lambda x: x.str.strip().str.lower())
+l9_1_df = l9_1_df.apply(lambda x: x.str.strip().str.lower())
+l9_2_df = l9_2_df.apply(lambda x: x.str.strip().str.lower())
+
+# Combine to a single dataframe.
+landsat_collection = pd.concat([l4_df, l5_1_df, l5_2_df, 
+                                l7_1_df, l7_2_df, l8_1_df, 
+                                l8_2_df, l9_1_df, l9_2_df], axis=0)
+
+# Replace 'nan' with 'NA'.
+landsat_collection = landsat_collection.replace('nan', 'NA')
+
+# Set PQA to '0' where RED and NIR are all 'NA'. This is a for pixels affected by the SLC
+# failure on Landsat 7 after 31 May 2003 that were classified as clear despite containing no data.
+landsat_collection.loc[(landsat_collection['RED'] == 'NA') &
+                       (landsat_collection['NIR'] == 'NA'), 'PQA'] = '0'
+
+# Function to split the 'TIME' column into 'DATE' and 'TIME' then reorder columns to ensure they come first.
+def datetime(df):
+    # Convert 'TIME' column to datetime
+    df['TIME'] = pd.to_datetime(df['TIME'])
+
+    # Extracting date and time components
+    df['DATE'] = df['TIME'].dt.date
+    df['TIME'] = df['TIME'].dt.time
+
+    # Reorder columns
+    cols = list(df.columns)
+    cols.remove('DATE')
+    cols.remove('TIME')
+    df = df[['DATE', 'TIME'] + cols]
+
+    # Convert all column names to lowercase
+    df.columns = map(str.lower, df.columns)
+
+    return df
+
+landsat_collection = datetime(landsat_collection)
+
+# Function to transform projection to British National Grid EPSG:27700.
+def convert_coordinates(df, input_crs='EPSG:4326', output_crs='EPSG:27700'):
+
+    # Create a GeoDataFrame
+    geometry = [Point(xy) for xy in zip(df['x'], df['y'])]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=input_crs)
+
+    # Transform coordinates
+    gdf = gdf.to_crs(output_crs)
+
+    # Extract easting and northing coordinates
+    gdf['easting'] = gdf['geometry'].x
+    gdf['northing'] = gdf['geometry'].y
+
+    # Drop the geometry column if needed
+    df_transformed = gdf.drop(columns='geometry')
+
+    return df_transformed
+
+landsat_collection = convert_coordinates(landsat_collection)
+
+# Select specific columns.
+selected_columns = ['date', 'time', 'northing', 'easting', 'nir', 'red', 'ndvi', 'pqa', 'spacecraft_id']
+landsat_collection = landsat_collection[selected_columns]
+
+# Create columns for month, season, and date.
+def process_dates(df):
+    df['date'] = pd.to_datetime(df['date'])
+    df['month'] = df['date'].dt.month
+    df['year'] = df['date'].dt.year
+    df['month_as_date'] = pd.to_datetime(df.apply(lambda row: f"{row['year']}-{row['month']:02d}-01", axis=1))
+    df['year_as_date'] = pd.to_datetime(df['year'].apply(lambda year: f"{year}-01-01"))
+
+    def calculate_season_date(row):
+        if 3 <= row['month'] <= 5:
+            return pd.to_datetime(f"{row['year']}-03-01")
+        elif 6 <= row['month'] <= 8:
+            return pd.to_datetime(f"{row['year']}-06-01")
+        elif 9 <= row['month'] <= 11:
+            return pd.to_datetime(f"{row['year']}-09-01")
+        elif row['month'] == 12:
+            return pd.to_datetime(f"{row['year']}-12-01")
+        else:
+            return pd.to_datetime(f"{row['year'] - 1}-12-01")
+
+    df['season_as_date'] = df.apply(calculate_season_date, axis=1)
+
+    return df
+
+landsat_collection = process_dates(landsat_collection)
+
+# Mutate pqa column.
+landsat_collection['pqa'] = np.select(
+    [landsat_collection['pqa'] == 0,
+     landsat_collection['pqa'].isin([1, 2, 3]),
+     landsat_collection['pqa'] == 4,
+     landsat_collection['pqa'] == 5,
+     landsat_collection['pqa'] == 6,
+     landsat_collection['pqa'] == 7],
+    ['non-valid', 'cloud', 'cloud_shadow', 'snow', 'valid', 'water'],
+    default=np.nan)
+
+# Convert all character columns to lowercase.
+landsat_collection = landsat_collection.apply(lambda x: x.astype(str).str.lower() if x.dtype == 'O' else x)
+
+# Filter duplicates, keeping the first instance.
+landsat_collection = landsat_collection.drop_duplicates()
+
+# Mutate unique image_id column.
+landsat_collection['image_id'] = (
+    landsat_collection['date'].astype(str) + '_' +
+    landsat_collection['time'].astype(str) + '_' +
+    landsat_collection['spacecraft_id'].astype(str))
+
+# Select specific columns
+selected_columns = ['date', 'month_as_date', 'season_as_date', 'year_as_date', 'image_id', 
+                    'northing', 'easting', 'ndvi', 'pqa', 'spacecraft_id']
+landsat_collection = landsat_collection[selected_columns]
+
+# Export to csv
+landsat_collection = landsat_collection.to_csv("rum_landsat.csv")
