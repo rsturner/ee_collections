@@ -1,4 +1,4 @@
-# Import necessary libraries
+# Import necessary libraries.
 import geopandas as gpd  # For geospatial data manipulation
 import pandas as pd  # For data manipulation
 import json 
